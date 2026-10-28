@@ -1,0 +1,200 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover"
+    />
+    <title>Équités préflop Hold'em</title>
+    <meta name="claude:viewport-fit-sides" content="cover" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Syne:wght@600;800&family=Familjen+Grotesk:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap"
+    />
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <div class="wrap">
+      <header>
+        <div class="top">
+          <h1>
+            <span data-i18n="h1">Équités préflop, 169 mains</span>
+            <span class="s" aria-hidden="true">♥</span>
+          </h1>
+          <div class="lang">
+            <button
+              type="button"
+              id="lang-btn"
+              class="lang-btn"
+              aria-haspopup="true"
+              aria-expanded="false"
+              aria-controls="lang-menu"
+            >
+              <span id="lang-flag" class="flag-icon"></span>
+              <svg
+                class="chev"
+                viewBox="0 0 10 6"
+                width="10"
+                height="6"
+                aria-hidden="true"
+              >
+                <path
+                  d="M1 1l4 4 4-4"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.5"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                />
+              </svg>
+            </button>
+            <div id="lang-menu" class="lang-menu" role="menu" hidden>
+              <button
+                type="button"
+                role="menuitemradio"
+                data-lang="fr"
+                aria-checked="false"
+              >
+                <span class="flag-icon"></span>Français
+              </button>
+              <button
+                type="button"
+                role="menuitemradio"
+                data-lang="en"
+                aria-checked="false"
+              >
+                <span class="flag-icon"></span>English
+              </button>
+            </div>
+          </div>
+        </div>
+        <p class="lede" data-i18n-html="lede"></p>
+      </header>
+
+      <section class="run">
+        <div class="run-controls">
+          <label for="trials" class="lbl" data-i18n="trialsLabel"
+            >Donnes par main</label
+          >
+          <select id="trials"></select>
+          <button type="button" id="run" class="primary">Recalculer</button>
+          <button type="button" id="resume" class="secondary" hidden></button>
+        </div>
+        <div
+          class="progress-track"
+          id="progress-track"
+          aria-hidden="true"
+          hidden
+        >
+          <div id="progress" class="progress"></div>
+        </div>
+        <p id="status" class="status" role="status"></p>
+      </section>
+
+      <div class="bar" role="toolbar">
+        <div class="group">
+          <span class="lbl" data-i18n="typeLabel">Type</span>
+          <button
+            type="button"
+            class="seg"
+            id="f-all"
+            data-f="all"
+            aria-pressed="true"
+            data-i18n="all"
+          >
+            Toutes
+          </button>
+          <button
+            type="button"
+            class="seg"
+            id="f-p"
+            data-f="p"
+            aria-pressed="false"
+            data-i18n="pairs"
+          >
+            Paires
+          </button>
+          <button
+            type="button"
+            class="seg"
+            id="f-s"
+            data-f="s"
+            aria-pressed="false"
+            data-i18n="suited"
+          >
+            Assorties
+          </button>
+          <button
+            type="button"
+            class="seg"
+            id="f-o"
+            data-f="o"
+            aria-pressed="false"
+            data-i18n="offsuit"
+          >
+            Non assorties
+          </button>
+        </div>
+        <div class="group">
+          <span class="lbl" data-i18n="measureLabel">Mesure</span>
+          <button
+            type="button"
+            class="seg"
+            id="m-eq"
+            data-m="eq"
+            aria-pressed="true"
+            data-i18n="equity"
+          >
+            Équité
+          </button>
+          <button
+            type="button"
+            class="seg"
+            id="m-win"
+            data-m="win"
+            aria-pressed="false"
+            data-i18n="wins"
+          >
+            Victoire seule
+          </button>
+        </div>
+        <div class="group">
+          <label class="lbl" for="q" data-i18n="searchLabel">Chercher</label
+          ><input
+            type="search"
+            id="q"
+            data-i18n-placeholder="searchPlaceholder"
+            autocomplete="off"
+          />
+        </div>
+        <div class="legend">
+          <span data-i18n="legendLow">sous la moyenne</span
+          ><span class="ramp" id="ramp" aria-hidden="true"></span
+          ><span data-i18n="legendHigh">au-dessus</span>
+          <button
+            type="button"
+            class="seg"
+            id="colorblind"
+            aria-pressed="false"
+            data-i18n="colorblind"
+          >
+            Mode daltonien
+          </button>
+        </div>
+        <span class="count" id="count"></span>
+      </div>
+
+      <div class="tablebox">
+        <table>
+          <thead>
+            <tr id="hrow"></tr>
+          </thead>
+          <tbody id="tb"></tbody>
+        </table>
+      </div>
+    </div>
+    <script src="script.js"></script>
+  </body>
+</html>
