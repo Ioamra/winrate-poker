@@ -1,0 +1,30 @@
+# Production, à côté du portfolio (même serveur, même tunnel Cloudflare).
+#
+#   docker compose up -d --build
+#
+# Le conteneur rejoint le réseau du portfolio (« portfolio_default ») : le conteneur
+# cloudflared du portfolio peut alors le joindre à l'adresse http://poker:8080.
+# Aucun port n'est publié sur la machine.
+
+name: poker-equites
+
+services:
+  poker:
+    build: .
+    restart: unless-stopped
+    environment:
+      BASE_PATH: /poker
+    volumes:
+      # Résultats recalculés par les visiteurs : conservés entre les déploiements.
+      # Au premier démarrage, le volume reçoit les résultats livrés dans l'image.
+      - results:/app/results
+    networks:
+      - portfolio
+
+networks:
+  portfolio:
+    name: portfolio_default
+    external: true
+
+volumes:
+  results:

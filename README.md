@@ -4,14 +4,15 @@ Tableau des 169 mains de départ du Texas Hold'em, avec leur probabilité de gag
 
 ## Fichiers
 
-| Fichier          | Rôle                                                          |
-| ---------------- | ------------------------------------------------------------- |
-| `index.html`     | Structure de la page                                          |
-| `style.css`      | Mise en forme (thème clair et sombre)                         |
-| `script.js`      | Moteur de calcul, stockage des résultats et interface         |
-| `server.js`      | Mini serveur sans dépendance : sert la page et écrit les JSON |
-| `compute.js`     | Calcule les fichiers de résultats directement avec Node       |
-| `results/*.json` | Résultats à 1, 5 et 10 millions de donnes par main            |
+| Fichier                            | Rôle                                                          |
+| ---------------------------------- | ------------------------------------------------------------- |
+| `index.html`                       | Structure de la page                                          |
+| `style.css`                        | Mise en forme (thème clair et sombre)                         |
+| `script.js`                        | Moteur de calcul, stockage des résultats et interface         |
+| `server.js`                        | Mini serveur sans dépendance : sert la page et écrit les JSON |
+| `Dockerfile`, `docker-compose.yml` | Déploiement à côté du portfolio                               |
+| `compute.js`                       | Calcule les fichiers de résultats directement avec Node       |
+| `results/*.json`                   | Résultats à 1, 5 et 10 millions de donnes par main            |
 
 ## Utilisation
 
@@ -29,7 +30,7 @@ Pendant un calcul, chaque main terminée est gardée dans le navigateur : si la 
 
 Sans serveur (`index.html` ouvert directement), le navigateur n'a pas le droit de lire ni d'écrire les fichiers JSON. La page calcule alors elle-même et garde les résultats dans le navigateur.
 
-La page existe en français et en anglais. Par défaut, elle s'affiche en français si le navigateur est en français, sinon en anglais ; les drapeaux en haut à droite changent la langue, et le choix est mémorisé. Les textes sont dans l'objet `I18N` de `script.js`.
+La page existe en français et en anglais. Par défaut, elle s'affiche en français si le navigateur est en français, sinon en anglais ; le drapeau en haut à droite ouvre le menu des langues, et le choix est mémorisé. Les textes sont dans l'objet `I18N` de `script.js`.
 
 Couleurs : dans chaque colonne, le jaune correspond à la part moyenne (50 % à 2 joueurs, 10 % à 10 joueurs), la pire main est rouge et la meilleure verte. Le « mode daltonien » remplace le vert par du bleu.
 

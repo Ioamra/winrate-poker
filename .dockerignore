@@ -1,0 +1,6 @@
+.git
+node_modules
+*.zip
+README.md
+docker-compose.yml
+results/*.tmp
