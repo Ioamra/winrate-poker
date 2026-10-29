@@ -130,8 +130,19 @@ function progress(done, total, t0) {
   const s = (Date.now() - t0) / 1000;
   const left = done ? ((total - done) * s) / done : 0;
   process.stdout.write(
-    `\r  ${done}/${total} · ${s.toFixed(0)} s · encore ~${(left / 60).toFixed(0)} min   `,
+    `\r  ${done}/${total} · ${clockText(s)} · encore ~${clockText(left)}   `,
   );
+}
+
+// 48 s, 4 min 08 s, 1 h 04 min 08 s
+function clockText(s) {
+  s = Math.round(s);
+  const h = Math.floor(s / 3600),
+    m = Math.floor((s % 3600) / 60),
+    sec = String(s % 60).padStart(2, "0");
+  if (h) return `${h} h ${String(m).padStart(2, "0")} min ${sec} s`;
+  if (m) return `${m} min ${sec} s`;
+  return `${s} s`;
 }
 
 // Écrit le fichier avec la durée du calcul et le nombre de cœurs utilisés
