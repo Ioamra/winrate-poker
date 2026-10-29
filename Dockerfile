@@ -2,7 +2,7 @@
 FROM node:24-slim
 
 WORKDIR /app
-COPY index.html style.css script.js server.js compute.js ./
+COPY index.html style.css engine.js i18n.js script.js server.js compute.js ./
 COPY results ./results
 
 # Le conteneur ne tourne pas en root

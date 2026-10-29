@@ -78,11 +78,25 @@ header {
   align-items: flex-start;
   gap: 16px;
 }
-/* Menu des langues : un drapeau, la liste s'ouvre au clic */
-.lang {
-  position: relative;
+/* Menus du thème et des langues : une icône (soleil / lune, drapeau), la liste s'ouvre au clic */
+.pickers {
+  display: flex;
+  gap: 6px;
   flex-shrink: 0;
   padding-top: 6px;
+}
+.picker {
+  position: relative;
+}
+.theme-icon {
+  display: block;
+  width: 18px;
+  height: 18px;
+  line-height: 0;
+  flex-shrink: 0;
+}
+.picker-btn {
+  height: 30px;
 }
 .flag-icon {
   display: block;
@@ -98,7 +112,7 @@ header {
   border-radius: 2px;
   box-shadow: 0 0 0 1px var(--line);
 }
-.lang-btn {
+.picker-btn {
   display: flex;
   align-items: center;
   gap: 6px;
@@ -110,16 +124,16 @@ header {
   border-radius: 6px;
   padding: 5px 8px;
 }
-.lang-btn:hover {
+.picker-btn:hover {
   color: var(--ink);
 }
-.lang-btn[aria-expanded="true"] .chev {
+.picker-btn[aria-expanded="true"] .chev {
   transform: rotate(180deg);
 }
 .chev {
   transition: transform 0.15s ease;
 }
-.lang-menu {
+.picker-menu {
   position: absolute;
   right: 0;
   top: calc(100% + 4px);
@@ -132,10 +146,10 @@ header {
   border-radius: 8px;
   box-shadow: 0 6px 20px rgb(0 0 0 / 0.12);
 }
-.lang-menu[hidden] {
+.picker-menu[hidden] {
   display: none;
 }
-.lang-menu button {
+.picker-menu button {
   display: flex;
   align-items: center;
   gap: 10px;
@@ -150,20 +164,20 @@ header {
   border-radius: 5px;
   padding: 7px 10px;
 }
-.lang-menu button:hover,
-.lang-menu button:focus-visible {
+.picker-menu button:hover,
+.picker-menu button:focus-visible {
   background: var(--bg);
   outline: none;
 }
-.lang-menu button[aria-checked="true"] {
+.picker-menu button[aria-checked="true"] {
   font-weight: 600;
 }
-.lang-menu button[aria-checked="true"]::after {
+.picker-menu button[aria-checked="true"]::after {
   content: "✓";
   margin-left: auto;
   color: var(--felt);
 }
-.lang-btn:focus-visible {
+.picker-btn:focus-visible {
   outline: 2px solid var(--felt);
   outline-offset: 2px;
 }
@@ -175,6 +189,16 @@ h1 {
   margin: 0;
   letter-spacing: -0.01em;
   text-wrap: balance;
+}
+h2 {
+  font-family: var(--display);
+  font-weight: 800;
+  font-size: clamp(22px, 3.4vw, 30px);
+  line-height: 1.1;
+  margin: 12px 0 0;
+}
+.range .lede {
+  margin-bottom: 4px;
 }
 h1 .s {
   color: var(--red);
@@ -238,6 +262,7 @@ input[type="search"] {
   cursor: pointer;
 }
 .primary:disabled,
+.secondary:disabled,
 select:disabled {
   opacity: 0.45;
   cursor: not-allowed;
@@ -335,16 +360,23 @@ summary:focus-visible {
 }
 .legend {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
   font-size: 12px;
   color: var(--muted);
 }
-.ramp {
-  width: 120px;
-  height: 10px;
+/* Légende : une pastille par palier de couleur (COLOR_TIERS dans script.js) */
+.tiers {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 2px;
+}
+.tier {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  padding: 2px 5px;
   border-radius: 3px;
-  background: var(--line);
 }
 .legend .seg {
   margin-left: 6px;
@@ -451,8 +483,39 @@ th[aria-sort="ascending"] .n::after {
 .tablebox th.rankhead.last {
   border-right: 1px solid var(--line);
 }
-.tablebox td.pending {
+.tablebox td.pending,
+.tablebox td.na {
   color: var(--muted);
+}
+.tablebox td.na {
+  cursor: help;
+}
+/* Message à la place d'un tableau pas encore calculé */
+.todo {
+  display: grid;
+  gap: 4px;
+  max-width: 70ch;
+}
+.todo p {
+  margin: 0;
+}
+.todo-title {
+  color: var(--ink);
+  font-weight: 600;
+}
+.todo-note {
+  font-size: 12.5px;
+  margin-left: 6px;
+}
+.todo code {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  color: var(--ink);
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 1px 5px;
+  user-select: all;
 }
 .tablebox tbody tr:hover td {
   background-image: linear-gradient(rgb(0 0 0 / 0.07), rgb(0 0 0 / 0.07));

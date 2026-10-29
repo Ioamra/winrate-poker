@@ -1,476 +1,47 @@
 /* =====================================================================
-   Équités préflop Texas Hold'em — tout est calculé ici, en JavaScript.
+   Équités préflop Texas Hold'em — la page (navigateur uniquement).
+   Le moteur de calcul et le format des fichiers sont dans engine.js,
+   les textes dans i18n.js : ces deux fichiers sont chargés avant celui-ci.
 
-   1. Moteur de calcul (générateur aléatoire, évaluateur, simulation).
-      Il est écrit dans une seule fonction pour pouvoir être copié tel quel
-      dans les Web Workers du navigateur et dans compute.js (Node).
-   2. Tests de l'évaluateur
-   3. Stockage des résultats : fichiers results/*.json (via server.js) + mémoire du navigateur
-   4. Calcul parallèle sur tous les cœurs du processeur
-   5. Traductions (français et anglais)
-   6. Interface (tableau, tri, filtres, couleurs, langue)
-
-   Codage d'une carte : entier 0..51
-     rang    = carte >> 2   (0 = 2, 1 = 3, ..., 8 = T, 9 = J, 10 = Q, 11 = K, 12 = A)
-     couleur = carte & 3    (0 = ♠, 1 = ♥, 2 = ♦, 3 = ♣)
+   1. Stockage des résultats : fichiers results/*.json (via server.js) + mémoire du navigateur
+   2. Calcul parallèle sur tous les cœurs du processeur
+   3. Langue et thème
+   4. Interface (deux tableaux, tri, filtres, couleurs, menus)
    ===================================================================== */
 
 "use strict";
 
 /* =====================================================================
-   1. MOTEUR
-   ===================================================================== */
-function pokerEngine() {
-  const RANKS = "23456789TJQKA";
-  const SUITS = "shdc";
-  const MAX_OPP = 9;
-  const CAT_NAMES = [
-    "Carte haute",
-    "Paire",
-    "Double paire",
-    "Brelan",
-    "Quinte",
-    "Couleur",
-    "Full",
-    "Carré",
-    "Quinte flush",
-  ];
-
-  /* --- Générateur aléatoire : xoshiro128** ---
-     Période de 2^128 : on peut tirer des milliards de cartes sans jamais
-     retomber sur la même séquence. */
-  function makeRng(seed) {
-    let s = seed >>> 0;
-    const splitmix = () => {
-      // sert seulement à initialiser l'état
-      s = (s + 0x9e3779b9) | 0;
-      let z = s;
-      z = Math.imul(z ^ (z >>> 16), 0x85ebca6b);
-      z = Math.imul(z ^ (z >>> 13), 0xc2b2ae35);
-      return (z ^ (z >>> 16)) >>> 0;
-    };
-    let a = splitmix(),
-      b = splitmix(),
-      c = splitmix(),
-      d = splitmix();
-    const rotl = (x, k) => (x << k) | (x >>> (32 - k));
-    return function randInt(n) {
-      // entier uniforme dans [0, n)
-      const r = Math.imul(rotl(Math.imul(b, 5), 7), 9) >>> 0;
-      const t = b << 9;
-      c ^= a;
-      d ^= b;
-      b ^= c;
-      a ^= d;
-      c ^= t;
-      d = rotl(d, 11);
-      return Math.floor((r / 4294967296) * n);
-    };
-  }
-
-  // Graine imprévisible : chaque calcul utilise un tirage différent
-  function randomSeed() {
-    if (typeof crypto !== "undefined" && crypto.getRandomValues) {
-      return crypto.getRandomValues(new Uint32Array(1))[0];
-    }
-    return Math.floor(Math.random() * 4294967296);
-  }
-
-  /* --- Évaluateur 7 cartes ---
-     Renvoie un entier : plus il est grand, meilleure est la main.
-     catégorie * 2^20 + départage (rangs codés sur 4 bits chacun)
-       8 quinte flush, 7 carré, 6 full, 5 couleur, 4 quinte,
-       3 brelan, 2 double paire, 1 paire, 0 carte haute */
-  function popcount(m) {
-    let n = 0;
-    while (m) {
-      m &= m - 1;
-      n++;
-    }
-    return n;
-  }
-  function highBit(m) {
-    return 31 - Math.clz32(m);
-  }
-
-  // Carte haute d'une quinte dans un masque de 13 rangs, ou -1. Gère la roue A-2-3-4-5.
-  function straightTop(mask) {
-    const x = (mask << 1) | ((mask >> 12) & 1); // bit 0 = As joué en carte basse
-    const y = x & (x >> 1) & (x >> 2) & (x >> 3) & (x >> 4);
-    return y ? highBit(y) + 3 : -1;
-  }
-
-  // Les n meilleurs rangs d'un masque, concaténés sur 4 bits chacun
-  function topRanks(mask, n) {
-    let v = 0;
-    for (let i = 0; i < n; i++) {
-      const b = highBit(mask);
-      v = (v << 4) | b;
-      mask &= ~(1 << b);
-    }
-    return v;
-  }
-
-  const suitMask = new Int32Array(4);
-  const rankCount = new Int32Array(13);
-  const seven = new Int32Array(7);
-
-  function evaluate7(c0, c1, c2, c3, c4, c5, c6) {
-    suitMask[0] = suitMask[1] = suitMask[2] = suitMask[3] = 0;
-    rankCount.fill(0);
-    seven[0] = c0;
-    seven[1] = c1;
-    seven[2] = c2;
-    seven[3] = c3;
-    seven[4] = c4;
-    seven[5] = c5;
-    seven[6] = c6;
-    for (let i = 0; i < 7; i++) {
-      const r = seven[i] >> 2;
-      suitMask[seven[i] & 3] |= 1 << r;
-      rankCount[r]++;
-    }
-    // Couleur / quinte flush
-    for (let s = 0; s < 4; s++) {
-      if (popcount(suitMask[s]) >= 5) {
-        const t = straightTop(suitMask[s]);
-        if (t >= 0) return (8 << 20) | t;
-        return (5 << 20) | topRanks(suitMask[s], 5);
-      }
-    }
-    const all = suitMask[0] | suitMask[1] | suitMask[2] | suitMask[3];
-    let quad = -1,
-      trip1 = -1,
-      trip2 = -1,
-      pair1 = -1,
-      pair2 = -1;
-    for (let r = 12; r >= 0; r--) {
-      const n = rankCount[r];
-      if (n === 4) quad = r;
-      else if (n === 3) {
-        if (trip1 < 0) trip1 = r;
-        else if (trip2 < 0) trip2 = r;
-      } else if (n === 2) {
-        if (pair1 < 0) pair1 = r;
-        else if (pair2 < 0) pair2 = r;
-      }
-    }
-    if (quad >= 0)
-      return (7 << 20) | (quad << 4) | topRanks(all & ~(1 << quad), 1);
-    if (trip1 >= 0 && (trip2 >= 0 || pair1 >= 0)) {
-      return (6 << 20) | (trip1 << 4) | Math.max(trip2, pair1);
-    }
-    const st = straightTop(all);
-    if (st >= 0) return (4 << 20) | st;
-    if (trip1 >= 0)
-      return (3 << 20) | (trip1 << 8) | topRanks(all & ~(1 << trip1), 2);
-    if (pair2 >= 0) {
-      return (
-        (2 << 20) |
-        (pair1 << 8) |
-        (pair2 << 4) |
-        topRanks(all & ~(1 << pair1) & ~(1 << pair2), 1)
-      );
-    }
-    if (pair1 >= 0)
-      return (1 << 20) | (pair1 << 12) | topRanks(all & ~(1 << pair1), 3);
-    return topRanks(all, 5);
-  }
-
-  // "As Kd 7h ..." -> valeur de la main
-  function evalString(str) {
-    const c = str
-      .trim()
-      .split(/\s+/)
-      .map((s) => RANKS.indexOf(s[0]) * 4 + SUITS.indexOf(s[1]));
-    return evaluate7(c[0], c[1], c[2], c[3], c[4], c[5], c[6]);
-  }
-
-  /* --- Les 169 mains, dans l'ordre de la grille classique : AA, AKs, AKo, ... --- */
-  function buildHands() {
-    const hands = [];
-    for (let a = 12; a >= 0; a--) {
-      for (let b = a; b >= 0; b--) {
-        if (a === b)
-          hands.push({
-            name: RANKS[a] + RANKS[b],
-            hi: a,
-            lo: b,
-            kind: "p",
-            combos: 6,
-          });
-        else {
-          hands.push({
-            name: RANKS[a] + RANKS[b] + "s",
-            hi: a,
-            lo: b,
-            kind: "s",
-            combos: 4,
-          });
-          hands.push({
-            name: RANKS[a] + RANKS[b] + "o",
-            hi: a,
-            lo: b,
-            kind: "o",
-            combos: 12,
-          });
-        }
-      }
-    }
-    return hands;
-  }
-
-  // Deux cartes concrètes représentant la main (les couleurs exactes ne changent rien)
-  function holeCards(hand) {
-    return [hand.hi * 4, hand.lo * 4 + (hand.kind === "s" ? 0 : 1)];
-  }
-
-  /* --- Simulation d'une main contre 1 à 9 adversaires au hasard ---
-     À chaque donne on distribue 9 adversaires ; la colonne « k adversaires »
-     utilise les k premiers. Chaque colonne reste une estimation sans biais.
-     Équité : pot gagné = 1, pot partagé entre n joueurs = 1/n.
-     Renvoie les totaux bruts (pas des %) pour pouvoir additionner des lots. */
-  function simulateHand(hand, trials, rand) {
-    const [h0, h1] = holeCards(hand);
-    const deck = new Int32Array(50);
-    let n = 0;
-    for (let c = 0; c < 52; c++) if (c !== h0 && c !== h1) deck[n++] = c;
-
-    const equity = new Float64Array(MAX_OPP);
-    const wins = new Float64Array(MAX_OPP);
-    const need = 5 + 2 * MAX_OPP;
-
-    for (let t = 0; t < trials; t++) {
-      // Mélange de Fisher-Yates partiel : seules les `need` premières cartes servent
-      for (let i = 0; i < need; i++) {
-        const j = i + rand(50 - i);
-        const tmp = deck[i];
-        deck[i] = deck[j];
-        deck[j] = tmp;
-      }
-      const b0 = deck[0],
-        b1 = deck[1],
-        b2 = deck[2],
-        b3 = deck[3],
-        b4 = deck[4];
-      const me = evaluate7(h0, h1, b0, b1, b2, b3, b4);
-      let ties = 0;
-      for (let k = 0; k < MAX_OPP; k++) {
-        const o = 5 + 2 * k;
-        const v = evaluate7(deck[o], deck[o + 1], b0, b1, b2, b3, b4);
-        if (v > me) break; // perdu ici et à toutes les tables plus grandes
-        if (v === me) ties++;
-        equity[k] += 1 / (ties + 1);
-        if (ties === 0) wins[k] += 1;
-      }
-    }
-    return { trials, equity: Array.from(equity), wins: Array.from(wins) };
-  }
-
-  // Totaux bruts -> pourcentages
-  function toPercent(raw) {
-    return {
-      eq: raw.equity.map((v) => (100 * v) / raw.trials),
-      win: raw.wins.map((v) => (100 * v) / raw.trials),
-    };
-  }
-
-  return {
-    RANKS,
-    MAX_OPP,
-    CAT_NAMES,
-    makeRng,
-    randomSeed,
-    evaluate7,
-    evalString,
-    buildHands,
-    holeCards,
-    simulateHand,
-    toPercent,
-  };
-}
-
-const Engine = pokerEngine();
-
-/* =====================================================================
-   2. TESTS DE L'ÉVALUATEUR
-   [description, main A, main B, attendu : 1 = A gagne, 0 = égalité, -1 = B gagne]
-   ===================================================================== */
-const TESTS = [
-  [
-    "Quinte flush royale bat carré",
-    "As Ks Qs Js Ts 2d 3c",
-    "9h 9d 9c 9s Kd 2h 3d",
-    1,
-  ],
-  ["Carré bat full", "9h 9d 9c 9s Kd 2h 3d", "Kh Kd Kc 2s 2d 4h 5c", 1],
-  ["Full bat couleur", "Kh Kd Kc 2s 2d 4h 5c", "Ah 9h 6h 4h 2h Kd 3c", 1],
-  ["Couleur bat quinte", "Ah 9h 6h 4h 2h Kd 3c", "9c Td Jh Qs Kd 2h 3c", 1],
-  ["Quinte bat brelan", "9c Td Jh Qs Kd 2h 3c", "7h 7d 7c As Kd 2h 4c", 1],
-  [
-    "Brelan bat double paire",
-    "7h 7d 7c As Kd 2h 4c",
-    "Ah Ad Kc Ks Qd 2h 4c",
-    1,
-  ],
-  ["Double paire bat paire", "Ah Ad Kc Ks Qd 2h 4c", "Ah Ad Qc Js 9d 2h 4c", 1],
-  ["Paire bat carte haute", "2h 2d 5c 7s 9d Jh Kc", "Ah Kd Qc Js 9d 2h 4c", 1],
-  [
-    "Roue A-2-3-4-5 reconnue comme quinte",
-    "Ah 2d 3c 4s 5d 9h Kc",
-    "Ah Ad Ac Ks Qd 2h 4c",
-    1,
-  ],
-  [
-    "Quinte au 6 bat la roue",
-    "2h 3d 4c 5s 6d Kh Kc",
-    "Ah 2d 3c 4s 5d Qh Kc",
-    1,
-  ],
-  [
-    "Pas de quinte K-A-2-3-4",
-    "Kh Ad 2c 3s 4d 9h 8c",
-    "Ah Ad 7c 6s 9d 2h 4c",
-    -1,
-  ],
-  [
-    "Kicker : AK bat AQ sur paire d'As",
-    "Ah Kd Ac 7s 5d 3h 2c",
-    "As Qd Ac 7s 5d 3h 2c",
-    1,
-  ],
-  [
-    "La planche joue : égalité",
-    "2h 3d As Ks Qs Js Ts",
-    "4h 5d As Ks Qs Js Ts",
-    0,
-  ],
-  [
-    "Full : le meilleur brelan compte",
-    "Kh Kd Kc 5s 5d 5h 2c",
-    "Qh Qd Qc 5s 5d 5h 2c",
-    1,
-  ],
-  [
-    "Deux brelans font un full",
-    "Kh Kd Kc 5s 5d 5h 2c",
-    "Ah Kd Qc Js Td 2h 2c",
-    1,
-  ],
-  [
-    "Trois paires : on garde les deux meilleures",
-    "Ah Ad Kc Ks 2d 2h 9c",
-    "Ah Ad Kc Ks 3d 3h 8c",
-    1,
-  ],
-  [
-    "Couleur : départage à la 5e carte",
-    "Ah Kh 9h 6h 3h 2d 2c",
-    "Ah Kh 9h 6h 2h 3d 3c",
-    1,
-  ],
-];
-
-function runTests() {
-  return TESTS.map(([name, a, b, expected]) => {
-    const va = Engine.evalString(a),
-      vb = Engine.evalString(b);
-    const got = va > vb ? 1 : va < vb ? -1 : 0;
-    return {
-      name,
-      a,
-      b,
-      ok: got === expected,
-      catA: Engine.CAT_NAMES[va >> 20],
-      catB: Engine.CAT_NAMES[vb >> 20],
-    };
-  });
-}
-
-/* =====================================================================
-   3. STOCKAGE DES RÉSULTATS
-   Un jeu de résultats : { trials, computedAt, hands: { "AA": {eq:[9], win:[9]}, ... } }
-     eq[k]  = équité contre k+1 adversaires, en %
-     win[k] = victoire sans partage contre k+1 adversaires, en %
-   - fichiers results/<donnes>.json, lus et écrits par server.js
+   1. STOCKAGE DES RÉSULTATS (format : voir engine.js)
+   Chaque jeu de résultats a un nom : "<donnes>" pour le premier tableau,
+   "<donnes>-top<p>" pour le second.
+   - fichiers results/<nom>.json, lus et écrits par server.js
    - mémoire du navigateur (localStorage) : sauvegarde main par main pendant
      un calcul, et seul stockage quand la page est ouverte sans serveur
    ===================================================================== */
 const STORAGE_PREFIX = "equites-preflop-v3-";
-const TRIAL_CHOICES = [1000000, 5000000, 10000000];
 
-function roundHand(p) {
-  const r = (v) => Math.round(v * 10000) / 10000;
-  return { eq: p.eq.map(r), win: p.win.map(r) };
-}
+const setName = (trials, top) => (top ? trials + "-top" + top : String(trials));
 
-// Contenu d'un fichier results/<donnes>.json : une main par ligne, lisible à l'œil
-// (même format pour la page, server.js et compute.js)
-function formatResultsFile(set) {
-  const names = Engine.buildHands()
-    .map((h) => h.name)
-    .filter((n) => set.hands[n]);
-  const lines = names.map(
-    (n) => "    " + JSON.stringify(n) + ": " + JSON.stringify(set.hands[n]),
-  );
-  return (
-    "{\n" +
-    '  "trials": ' +
-    set.trials +
-    ",\n" +
-    '  "computedAt": ' +
-    JSON.stringify(set.computedAt) +
-    ",\n" +
-    '  "hands": {\n' +
-    lines.join(",\n") +
-    "\n  }\n}\n"
-  );
-}
-
-// Vérifie qu'un jeu de résultats est complet et plausible (utilisé aussi par server.js)
-function validateResults(set) {
-  if (!set || typeof set !== "object") return "contenu vide";
-  if (!TRIAL_CHOICES.includes(set.trials)) return "nombre de donnes non prévu";
-  if (typeof set.computedAt !== "string" || isNaN(Date.parse(set.computedAt)))
-    return "date invalide";
-  const names = Engine.buildHands().map((h) => h.name);
-  if (!set.hands || Object.keys(set.hands).length !== names.length)
-    return "il faut les 169 mains";
-  for (const n of names) {
-    const h = set.hands[n];
-    if (!h) return "main manquante : " + n;
-    for (const key of ["eq", "win"]) {
-      const a = h[key];
-      if (
-        !Array.isArray(a) ||
-        a.length !== Engine.MAX_OPP ||
-        !a.every((v) => typeof v === "number" && v >= 0 && v <= 100)
-      )
-        return "valeurs invalides pour " + n;
-    }
-  }
-  return null;
-}
-
-function storageRead(trials) {
+function storageRead(name) {
   try {
-    const raw = localStorage.getItem(STORAGE_PREFIX + trials);
+    const raw = localStorage.getItem(STORAGE_PREFIX + name);
     return raw ? JSON.parse(raw) : null;
   } catch (e) {
     return null;
   }
 }
-function storageWrite(trials, set) {
+function storageWrite(name, set) {
   try {
-    localStorage.setItem(STORAGE_PREFIX + trials, JSON.stringify(set));
+    localStorage.setItem(STORAGE_PREFIX + name, JSON.stringify(set));
     return true;
   } catch (e) {
     return false;
   }
 }
-function storageRemove(trials) {
+function storageRemove(name) {
   try {
-    localStorage.removeItem(STORAGE_PREFIX + trials);
+    localStorage.removeItem(STORAGE_PREFIX + name);
   } catch (e) {
     /* rien à faire */
   }
@@ -489,22 +60,27 @@ async function detectServer() {
   }
 }
 
-// Lit results/<donnes>.json, ou null s'il n'existe pas encore
-async function loadResultsFile(trials) {
+// Lit results/<nom>.json, ou null s'il n'existe pas encore (top : second tableau)
+async function loadResultsFile(trials, top) {
   try {
-    const r = await fetch("results/" + trials + ".json", { cache: "no-store" });
+    const r = await fetch("results/" + setName(trials, top) + ".json", {
+      cache: "no-store",
+    });
     if (!r.ok) return null;
     const set = await r.json();
-    return validateResults(set) ? null : set;
+    const problem = top ? validateRangeResults(set) : validateResults(set);
+    return problem || set.trials !== trials || (top && set.top !== top)
+      ? null
+      : set;
   } catch (e) {
     return null;
   }
 }
 
-// Demande au serveur d'écrire results/<donnes>.json. Renvoie null si tout va bien, sinon le message d'erreur.
+// Demande au serveur d'écrire results/<nom>.json. Renvoie null si tout va bien, sinon le message d'erreur.
 async function saveResultsFile(set) {
   try {
-    const r = await fetch("api/results/" + set.trials, {
+    const r = await fetch("api/results/" + setName(set.trials, set.top), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(set),
@@ -520,17 +96,17 @@ const isComplete = (set, n) =>
   !!set && !!set.hands && Object.keys(set.hands).length === n;
 
 /* =====================================================================
-   4. CALCUL PARALLÈLE
+   2. CALCUL PARALLÈLE
    Le moteur est recopié dans des Web Workers (un par cœur).
-   Chaque worker calcule une main entière puis en demande une autre.
-   Sans Workers, repli sur le fil principal par petits lots.
+   Une tâche = une main (voir Engine.simulateJob) ; chaque worker en calcule
+   une puis en demande une autre. Sans Workers, repli sur le fil principal.
    ===================================================================== */
 function createComputer(onResult, onDone) {
   let workers = [],
+    jobs = [],
     queue = [],
     running = 0,
     stopped = false;
-  const hands = Engine.buildHands();
   const size = Math.max(
     1,
     Math.min(
@@ -545,8 +121,7 @@ function createComputer(onResult, onDone) {
       pokerEngine.toString() +
       ")();" +
       "onmessage=function(e){var d=e.data;" +
-      "var raw=E.simulateHand(d.hand,d.trials,E.makeRng(E.randomSeed()));" +
-      "postMessage({index:d.index,result:E.toPercent(raw)});};";
+      "postMessage({id:d.id,result:E.simulateJob(d.job,E.makeRng(E.randomSeed()))});};";
     const url = URL.createObjectURL(
       new Blob([src], { type: "text/javascript" }),
     );
@@ -563,44 +138,47 @@ function createComputer(onResult, onDone) {
     }
   };
 
-  function feed(worker, trials) {
+  function feed(worker) {
     if (stopped || !queue.length) {
       if (running === 0) finish();
       return;
     }
-    const index = queue.shift();
+    const id = queue.shift();
     running++;
     worker.onmessage = (e) => {
       running--;
       if (stopped) return;
-      onResult(e.data.index, e.data.result);
-      feed(worker, trials);
+      onResult(jobs[e.data.id], e.data.result);
+      feed(worker);
     };
-    const h = hands[index];
-    worker.postMessage({
-      index,
-      trials,
-      hand: { hi: h.hi, lo: h.lo, kind: h.kind },
-    });
+    worker.postMessage({ id, job: jobs[id] });
   }
 
-  // Repli : fil principal, lots de 100 000 donnes pour garder la page réactive
-  function runMainThread(trials) {
+  /* Repli : fil principal. Premier tableau par lots de 100 000 donnes pour garder
+     la page réactive ; second tableau main par main (la page se fige un instant). */
+  function runMainThread() {
     const CHUNK = 100000;
-    let index = null,
+    const hands = Engine.buildHands();
+    let id = null,
       raw = null,
       rand = Engine.makeRng(Engine.randomSeed());
     function step() {
       if (stopped) return;
-      if (index === null) {
+      if (id === null) {
         if (!queue.length) return finish();
-        index = queue.shift();
+        id = queue.shift();
         raw = null;
       }
+      const job = jobs[id];
+      if (job.ranges) {
+        onResult(job, Engine.simulateJob(job, rand));
+        id = null;
+        return setTimeout(step, 0);
+      }
       const end = performance.now() + 40;
-      while (performance.now() < end && (!raw || raw.trials < trials)) {
-        const n = Math.min(CHUNK, trials - (raw ? raw.trials : 0));
-        const part = Engine.simulateHand(hands[index], n, rand);
+      while (performance.now() < end && (!raw || raw.trials < job.trials)) {
+        const n = Math.min(CHUNK, job.trials - (raw ? raw.trials : 0));
+        const part = Engine.simulateHand(hands[job.index], n, rand);
         if (!raw) raw = part;
         else {
           raw.trials += part.trials;
@@ -610,9 +188,9 @@ function createComputer(onResult, onDone) {
           }
         }
       }
-      if (raw.trials >= trials) {
-        onResult(index, Engine.toPercent(raw));
-        index = null;
+      if (raw.trials >= job.trials) {
+        onResult(job, Engine.toPercent(raw));
+        id = null;
       }
       setTimeout(step, 0);
     }
@@ -621,18 +199,19 @@ function createComputer(onResult, onDone) {
 
   return {
     threads: size,
-    start(indices, trials) {
+    start(list) {
       stopped = false;
       finished = false;
-      queue = indices.slice();
+      jobs = list;
+      queue = list.map((j, i) => i);
       running = 0;
       try {
         if (!workers.length) workers = makeWorkers();
-        workers.forEach((w) => feed(w, trials));
+        workers.forEach((w) => feed(w));
         return "workers";
       } catch (e) {
         workers = [];
-        runMainThread(trials);
+        runMainThread();
         return "main";
       }
     },
@@ -646,133 +225,10 @@ function createComputer(onResult, onDone) {
 }
 
 /* =====================================================================
-   5. TRADUCTIONS
-   Chaque texte a une clé. Dans le HTML :
-     data-i18n="clé"          remplace le texte de l'élément
-     data-i18n-html="clé"     remplace son contenu (texte avec <b>…</b>)
-     data-i18n-placeholder / data-i18n-aria-label   remplacent ces attributs
-   {nom} dans un texte est remplacé par la valeur donnée à t().
+   3. LANGUE ET THÈME (les textes sont dans i18n.js)
    ===================================================================== */
-const I18N = {
-  fr: {
-    locale: "fr-FR",
-    title: "Équités préflop Hold'em",
-    h1: "Équités préflop, 169 mains",
-    lede: "Probabilité de gagner le pot si tout le monde va à l'abattage, contre des mains <b>tirées au hasard</b>, par simulation Monte Carlo. Les égalités comptent comme une part du pot.",
-    langLabel: "Langue",
-    trialsLabel: "Donnes par main",
-    trialsOption: "{n} (±{m} pt)",
-    run: "Recalculer",
-    stop: "Arrêter",
-    resume: "Reprendre ({done} / {n})",
-    typeLabel: "Type",
-    all: "Toutes",
-    pairs: "Paires",
-    suited: "Assorties",
-    offsuit: "Non assorties",
-    measureLabel: "Mesure",
-    equity: "Équité",
-    wins: "Victoire seule",
-    searchLabel: "Chercher",
-    searchPlaceholder: "ex. AK, 77, T9s",
-    legendLow: "sous la moyenne",
-    legendHigh: "au-dessus",
-    colorblind: "Mode daltonien",
-    count: "{n} main",
-    countPlural: "{n} mains",
-    thHand: "Main",
-    thRank: "Rang",
-    thRankSub: "sur 169 mains",
-    thTop: "Top",
-    thTopSub: "des 169 mains",
-    thAtPlayers: "à {p} joueurs",
-    thPlayers: "{p} joueurs",
-    thOpp: "{k} adv.",
-    thAvg: "moy. {v} %",
-    percent: "{v} %",
-    empty: "Aucune main ne correspond. Essaie « AK », « 77 » ou « T9s ».",
-    loading: "Chargement…",
-    computing:
-      "Calcul en cours sur {t} : {d} / {n} mains{eta}. Les mains déjà calculées sont gardées si tu fermes la page.",
-    cores: "{n} cœur",
-    coresPlural: "{n} cœurs",
-    eta: " · encore environ {x}",
-    minutes: "{n} min",
-    seconds: "{n} s",
-    shown:
-      "Résultats à {trials} donnes par main, calculés le {date}{src}. Écart maximal attendu sur tout le tableau : ±{m} point.",
-    srcFile: ", lus dans results/{trials}.json",
-    srcLocal: ", gardés dans ce navigateur",
-    dateAt: "{d} à {h}",
-    none: "Aucun résultat pour {trials} donnes.",
-    interrupted: " Un recalcul a été interrompu à {d} / {n} mains.",
-    noServer:
-      " Page ouverte sans server.js : les recalculs restent dans ce navigateur.",
-    saveFail: " Le serveur n'a pas pu écrire le fichier ({e}).",
-    privateFail:
-      " Attention : le navigateur refuse de garder ces résultats (navigation privée ?).",
-  },
-  en: {
-    locale: "en-GB",
-    title: "Hold'em Preflop Equities",
-    h1: "Preflop equities, 169 hands",
-    lede: "Chance of winning the pot when everyone goes to showdown against <b>random hands</b>, by Monte Carlo simulation. Split pots count as a share of the pot.",
-    langLabel: "Language",
-    trialsLabel: "Deals per hand",
-    trialsOption: "{n} (±{m} pt)",
-    run: "Recalculate",
-    stop: "Stop",
-    resume: "Resume ({done} / {n})",
-    typeLabel: "Type",
-    all: "All",
-    pairs: "Pairs",
-    suited: "Suited",
-    offsuit: "Offsuit",
-    measureLabel: "Measure",
-    equity: "Equity",
-    wins: "Outright wins",
-    searchLabel: "Search",
-    searchPlaceholder: "e.g. AK, 77, T9s",
-    legendLow: "below average",
-    legendHigh: "above",
-    colorblind: "Colour-blind mode",
-    count: "{n} hand",
-    countPlural: "{n} hands",
-    thHand: "Hand",
-    thRank: "Rank",
-    thRankSub: "out of 169 hands",
-    thTop: "Top",
-    thTopSub: "of 169 hands",
-    thAtPlayers: "{p} players",
-    thPlayers: "{p} players",
-    thOpp: "{k} opp.",
-    thAvg: "avg {v}%",
-    percent: "{v}%",
-    empty: "No hand matches. Try “AK”, “77” or “T9s”.",
-    loading: "Loading…",
-    computing:
-      "Computing on {t}: {d} / {n} hands{eta}. Finished hands are kept if you close the page.",
-    cores: "{n} core",
-    coresPlural: "{n} cores",
-    eta: " · about {x} left",
-    minutes: "{n} min",
-    seconds: "{n} s",
-    shown:
-      "Results with {trials} deals per hand, computed on {date}{src}. Expected maximum error across the whole table: ±{m} points.",
-    srcFile: ", read from results/{trials}.json",
-    srcLocal: ", stored in this browser",
-    dateAt: "{d} at {h}",
-    none: "No results for {trials} deals.",
-    interrupted: " A recalculation was interrupted at {d} / {n} hands.",
-    noServer:
-      " Page opened without server.js: recalculations stay in this browser.",
-    saveFail: " The server could not write the file ({e}).",
-    privateFail:
-      " Warning: the browser won't keep these results (private browsing?).",
-  },
-};
-
 const LANG_KEY = "equites-preflop-lang";
+const THEME_KEY = "equites-preflop-theme"; // aussi lu dans index.html, avant l'affichage
 const COLORBLIND_KEY = "equites-preflop-colorblind";
 
 // Langue par défaut : choix déjà fait, sinon français si le navigateur est en français, sinon anglais
@@ -791,35 +247,30 @@ function detectLanguage() {
 }
 
 /* =====================================================================
-   6. INTERFACE
+   4. INTERFACE
    ===================================================================== */
 
-/* Couleurs des cases : 7 teintes de la pire main (rouge) à la meilleure.
-   Le jaune pâle du milieu correspond exactement à la part moyenne. */
-const PALETTES = {
-  normal: [
-    "#d73027",
-    "#fc8d59",
-    "#fee08b",
-    "#ffffbf",
-    "#d9ef8b",
-    "#91cf60",
-    "#1a9850",
-  ],
-  colorblind: [
-    "#d73027",
-    "#fc8d59",
-    "#fee090",
-    "#ffffbf",
-    "#e0f3f8",
-    "#91bfdb",
-    "#4575b4",
-  ],
-};
+/* Couleurs des cases, par paliers de top.
+   Dans chaque colonne, une main prend la couleur du premier palier qui la contient :
+   top: 3 = les mains du top 0 à 3 %, puis top: 8 = de 3 à 8 %, etc.
+   (top d'une main = son rang dans la colonne / nombre de mains, comme la colonne « Top »).
+   Lignes à ajouter, retirer ou modifier librement ; la dernière doit valoir 100.
+   normal : couleurs habituelles ; colorblind : mode daltonien (bleu au lieu de vert).
+   La couleur du texte, claire ou foncée, est choisie automatiquement. */
+const COLOR_TIERS = [
+  { top: 3, normal: "#0b6b35", colorblind: "#08306b" },
+  { top: 8, normal: "#1a9850", colorblind: "#2166ac" },
+  { top: 15, normal: "#66bd63", colorblind: "#4393c3" },
+  { top: 25, normal: "#a6d96a", colorblind: "#92c5de" },
+  { top: 40, normal: "#d9ef8b", colorblind: "#d1e5f0" },
+  { top: 55, normal: "#fee08b", colorblind: "#fddbc7" },
+  { top: 70, normal: "#fdae61", colorblind: "#f4a582" },
+  { top: 85, normal: "#f46d43", colorblind: "#d6604d" },
+  { top: 100, normal: "#d73027", colorblind: "#b2182b" },
+];
 
-/* Forme de l'échelle de couleurs : 1 = linéaire (beaucoup de jaune),
-   0,5 = racine carrée (réglage actuel), plus petit = encore moins de jaune. */
-const COLOR_CURVE = 0.5;
+// En thème sombre, les couleurs sont mélangées au fond pour moins éblouir (0 = pas du tout)
+const DARK_DIM = 0.45;
 
 /* Drapeaux dessinés en SVG, tous au même format 3:2 (les emoji drapeaux ne s'affichent pas sous Windows) */
 const FLAGS = {
@@ -836,6 +287,17 @@ const FLAGS = {
     '<path d="M15,0 V20 M0,10 H30" stroke="#c8102e" stroke-width="4"/></svg>',
 };
 const LANG_NAMES = { fr: "Français", en: "English" };
+
+/* Soleil et lune du menu de thème, dessinés en SVG comme les drapeaux */
+const THEME_ICONS = {
+  light:
+    '<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">' +
+    '<circle cx="12" cy="12" r="4.2" fill="currentColor"/>' +
+    '<path d="M12 2v2.5M12 19.5V22M2 12h2.5M19.5 12H22M4.9 4.9l1.8 1.8M17.3 17.3l1.8 1.8M4.9 19.1l1.8-1.8M17.3 6.7l1.8-1.8"/></svg>',
+  dark:
+    '<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">' +
+    '<path d="M20.5 14.6A8.5 8.5 0 0 1 9.4 3.5a8.5 8.5 0 1 0 11.1 11.1z" fill="currentColor"/></svg>',
+};
 
 const hexToRgb = (h) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16));
 const rgbToCss = (c) => "rgb(" + c.map((v) => Math.round(v)).join(" ") + ")";
@@ -869,23 +331,13 @@ function initPage() {
     /* rien */
   }
 
-  let trials = TRIAL_CHOICES[0];
-  let shown = null; // jeu complet affiché (fichier ou navigateur)
-  let shownFrom = ""; // "file" | "local"
+  let trials = TRIAL_CHOICES[TRIAL_CHOICES.length - 1]; // au démarrage : le plus grand jeu disponible
+  let top = TOP_CHOICES[0]; // second tableau : adversaires dans le top <top> %
   let serverMode = false; // true si server.js répond : les résultats s'écrivent dans results/*.json
-  let saveNote = ""; // clé et valeur du dernier problème d'enregistrement
-  let fresh = null; // recalcul en cours ou interrompu (dans le navigateur)
-  let computing = false,
-    computer = null,
-    runStart = 0,
-    runDoneAtStart = 0;
+  let computer = null; // un seul calcul à la fois, tous cœurs utilisés
   let filter = "all",
     measure = "eq",
-    sortCol = 1,
-    sortDir = -1,
     query = "";
-  let rankCol = 1; // colonne de joueurs qui sert au rang et au top
-  let loaded = false;
 
   /* --- Textes --- */
   const t = (key, vars) => {
@@ -916,6 +368,174 @@ function initPage() {
       }),
     });
   };
+  const durationText = (s) =>
+    s < 90
+      ? t("seconds", { n: Math.max(1, Math.round(s)) })
+      : s < 5400
+        ? t("minutes", { n: Math.round(s / 60) })
+        : t("hours", {
+            h: Math.floor(s / 3600),
+            m: Math.round((s % 3600) / 60),
+          });
+  // « en 27 min sur 16 cœurs », si le fichier contient la durée (anciens fichiers : rien)
+  const tookText = (set) =>
+    typeof set.duration === "number"
+      ? t("took", {
+          x: durationText(set.duration),
+          t: plural("cores", set.threads || 1),
+        })
+      : "";
+  const escapeAttr =(s) => s.replace(/&/g, "&amp;").replace(/"/g, "&quot;");
+
+  /* --- Les deux calculs ---
+     Chacun a son jeu affiché (shown, fichier ou navigateur) et son recalcul
+     en cours ou interrompu (fresh, gardé main par main dans le navigateur).
+     Le second tableau a besoin du premier : il en tire le classement des mains. */
+  const newCalc = (o) =>
+    Object.assign(
+      {
+        shown: null,
+        shownFrom: "", // "file" | "local"
+        fresh: null,
+        computing: false,
+        loaded: false,
+        saveNote: "", // clé et valeur du dernier problème d'enregistrement
+        runStart: 0,
+        durationBefore: 0, // durée des parties déjà faites d'un calcul repris
+        runDoneAtStart: 0,
+      },
+      o,
+    );
+  const calcs = [
+    newCalc({
+      ui: {
+        run: "run",
+        resume: "resume",
+        progress: "progress",
+        track: "progress-track",
+        status: "status",
+      },
+      top: () => null,
+      newSet: () => ({ trials, computedAt: null, hands: {} }),
+      jobs: (set, indices) =>
+        indices.map((index) => ({ index, trials: set.trials })),
+      canStart: () => true,
+      serverCommand: () => "node compute.js " + trials,
+    }),
+    newCalc({
+      ui: {
+        run: "run2",
+        resume: "resume2",
+        progress: "progress2",
+        track: "progress-track2",
+        status: "range-status",
+      },
+      top: () => top,
+      newSet: () => {
+        const base = calcs[0].shown;
+        if (!base) return null;
+        return {
+          trials,
+          top,
+          computedAt: null,
+          basedOn: base.computedAt,
+          ranges: topRanges(base, top),
+          hands: {},
+        };
+      },
+      jobs: (set, indices) => {
+        const ranges = set.ranges.map(rangeCombos);
+        return indices.map((index) => ({ index, trials: set.trials, ranges }));
+      },
+      canStart: () => !!calcs[0].shown,
+      serverCommand: () => "node compute.js --top=" + top + " " + trials,
+    }),
+  ];
+  const nameOf = (c) => setName(trials, c.top());
+  const busy = () => calcs.some((c) => c.computing);
+
+  // Données d'une main : le recalcul en cours prime, sinon le jeu complet
+  function cell(c, i) {
+    const name = hands[i].name;
+    if (c.computing || (c.fresh && !c.shown)) {
+      if (c.fresh && c.fresh.hands[name])
+        return { data: c.fresh.hands[name], old: false };
+      if (c.shown && c.shown.hands[name])
+        return { data: c.shown.hands[name], old: true };
+      return null;
+    }
+    return c.shown && c.shown.hands[name]
+      ? { data: c.shown.hands[name], old: false }
+      : null;
+  }
+  // null : main pas encore calculée, ou case presque impossible (second tableau)
+  const valueOf = (c, i, k) => {
+    const x = cell(c, i);
+    return x ? (measure === "eq" ? x.data.eq : x.data.win)[k - 1] : null;
+  };
+  const rangesOf = (c) => {
+    const set = c.computing || (c.fresh && !c.shown) ? c.fresh : c.shown;
+    return set && set.ranges;
+  };
+
+  /* Les deux tableaux partagent filtres, recherche et mesure ;
+     chacun garde son tri et la colonne qui sert au rang et au top. */
+  const tables = [
+    {
+      calc: calcs[0],
+      head: $("hrow"),
+      body: $("tb"),
+      sortCol: 1,
+      sortDir: -1,
+      rankCol: 1, // colonne de joueurs qui sert au rang et au top
+      fair: (k) => t("thAvg", { v: fmt(100 / (k + 1), 1) }),
+      headTitle: () => "",
+    },
+    {
+      calc: calcs[1],
+      head: $("hrow2"),
+      body: $("tb2"),
+      sortCol: 1,
+      sortDir: -1,
+      rankCol: 1,
+      fair: () => "&nbsp;",
+      headTitle: (k) => {
+        const r = rangesOf(calcs[1]);
+        return r ? t("rangeHead", { p: k + 1, list: r[k - 1].join(" ") }) : "";
+      },
+    },
+  ];
+
+  /* --- Message à la place d'un tableau pas encore calculé --- */
+  function placeholderHTML(c) {
+    if (!c.loaded) return t("loading");
+    if (c.shown || c.fresh || c.computing) return null;
+    if (!c.canStart()) return t("needMain", { trials: int(trials) });
+    const cmd = c.serverCommand();
+    return (
+      '<div class="todo"><p class="todo-title">' +
+      (c.top()
+        ? t("notComputedRange", { trials: int(trials), p: top })
+        : t("notComputed", { trials: int(trials) })) +
+      '</p><p><button type="button" class="primary" data-start="' +
+      calcs.indexOf(c) +
+      '"' +
+      (busy() ? " disabled" : "") +
+      ">" +
+      t("computeHere") +
+      '</button> <span class="todo-note">' +
+      t("computeHereNote") +
+      "</span></p><p>" +
+      t("serverCmd") +
+      " <code>" +
+      cmd +
+      "</code><br>" +
+      t("dockerCmd") +
+      " <code>docker compose exec poker " +
+      cmd +
+      "</code></p></div>"
+    );
+  }
 
   function applyLanguage() {
     document.documentElement.lang = lang;
@@ -953,12 +573,22 @@ function initPage() {
         t("trialsOption", { n: int(n), m: marginText(n) }) +
         "</option>",
     ).join("");
-    buildHead();
+    $("top").innerHTML = TOP_CHOICES.map(
+      (p) =>
+        '<option value="' +
+        p +
+        '"' +
+        (p === top ? " selected" : "") +
+        ">" +
+        t("topOption", { p }) +
+        "</option>",
+    ).join("");
+    tables.forEach(buildHead);
     render();
     updateStatus();
   }
 
-  /* --- Couleurs --- */
+  /* --- Thème --- */
   const isDark = () => {
     const forced = document.documentElement.getAttribute("data-theme");
     if (forced) return forced === "dark";
@@ -967,54 +597,67 @@ function initPage() {
       window.matchMedia("(prefers-color-scheme: dark)").matches
     );
   };
-  // Teinte à une position p entre 0 (pire) et 1 (meilleure), adoucie en thème sombre
-  function paletteColor(p) {
-    const stops = PALETTES[colorblind ? "colorblind" : "normal"].map(hexToRgb);
-    const x = Math.min(Math.max(p, 0), 1) * (stops.length - 1);
-    const i = Math.min(Math.floor(x), stops.length - 2);
-    let c = mix(stops[i], stops[i + 1], x - i);
-    if (isDark()) c = mix(c, hexToRgb("#171d1a"), 0.45);
-    return c;
-  }
-  function cellStyle(v, k, stats) {
-    // Jaune = part moyenne ; chaque côté s'étire jusqu'à la pire / meilleure main de la colonne.
-    // L'écart passe par COLOR_CURVE (racine carrée) : les mains proches de la moyenne
-    // s'écartent vite du jaune, ce qui donne plus de vert et de rouge dans le tableau.
-    const fair = 100 / (k + 1),
-      s = stats[k];
-    let p = 0.5;
-    if (v >= fair && s.max > fair)
-      p = 0.5 + 0.5 * Math.pow((v - fair) / (s.max - fair), COLOR_CURVE);
-    else if (v < fair && s.min < fair)
-      p = 0.5 - 0.5 * Math.pow((fair - v) / (fair - s.min), COLOR_CURVE);
-    const bg = paletteColor(p);
-    // const ink = luminance(bg) > 0.22 ? "#151a17" : "#f4f7f5";
-    const ink = "#f4f7f5";
-    return "background-color:" + rgbToCss(bg) + ";color:" + ink;
-  }
-  function updateLegend() {
-    const stops = [0, 1 / 6, 2 / 6, 3 / 6, 4 / 6, 5 / 6, 1].map((p) =>
-      rgbToCss(paletteColor(p)),
+  // Le bouton montre le thème affiché (choisi, sinon celui du système)
+  function updateThemeButton() {
+    const current = isDark() ? "dark" : "light";
+    $("theme-icon").innerHTML = THEME_ICONS[current];
+    $("theme-btn").setAttribute(
+      "aria-label",
+      t("themeLabel") + " : " + t(current),
     );
-    $("ramp").style.background =
-      "linear-gradient(90deg," + stops.join(",") + ")";
+    $("theme-btn").title = t(current);
+    document
+      .querySelectorAll("[data-theme-choice]")
+      .forEach((b) =>
+        b.setAttribute(
+          "aria-checked",
+          String(b.dataset.themeChoice === current),
+        ),
+      );
+  }
+
+  /* --- Couleurs --- */
+  // Style CSS de chaque palier (fond + texte lisible), selon le mode daltonien et le thème
+  function tierStyles() {
+    const surface = hexToRgb("#171d1a");
+    return COLOR_TIERS.map((tier) => {
+      let bg = hexToRgb(colorblind ? tier.colorblind : tier.normal);
+      if (isDark()) bg = mix(bg, surface, DARK_DIM);
+      const ink = luminance(bg) > 0.22 ? "#151a17" : "#f4f7f5";
+      return "background-color:" + rgbToCss(bg) + ";color:" + ink;
+    });
+  }
+  // Indice du palier d'une main dont le top vaut pct (en %)
+  const tierOf = (pct) => {
+    const i = COLOR_TIERS.findIndex((tier) => pct <= tier.top + 1e-9);
+    return i < 0 ? COLOR_TIERS.length - 1 : i;
+  };
+  function updateLegend(styles) {
+    $("tiers").innerHTML = COLOR_TIERS.map(
+      (tier, i) =>
+        '<span class="tier" style="' +
+        styles[i] +
+        '">' +
+        t("legendTier", { v: tier.top }) +
+        "</span>",
+    ).join("");
     $("colorblind").setAttribute("aria-pressed", String(colorblind));
   }
 
-  /* --- En-tête du tableau --- */
-  function buildHead() {
+  /* --- En-tête d'un tableau --- */
+  function buildHead(tb) {
     let head =
       '<th class="left sticky" scope="col"><button type="button" data-c="0"><span class="n">' +
       t("thHand") +
       '</span><span class="sub">&nbsp;</span><span class="fair">&nbsp;</span></button></th>' +
       '<th scope="col" class="rankhead"><div class="th-static"><span class="n">' +
       t("thRank") +
-      '</span><span class="sub" id="rank-sub"></span><span class="fair">' +
+      '</span><span class="sub rank-sub"></span><span class="fair">' +
       t("thRankSub") +
       "</span></div></th>" +
       '<th scope="col" class="rankhead last"><div class="th-static"><span class="n">' +
       t("thTop") +
-      '</span><span class="sub" id="top-sub"></span><span class="fair">' +
+      '</span><span class="sub rank-sub"></span><span class="fair">' +
       t("thTopSub") +
       "</span></div></th>";
     for (let k = 1; k <= MAX_OPP; k++) {
@@ -1028,42 +671,23 @@ function initPage() {
         t("thOpp", { k }) +
         "</span>" +
         '<span class="fair">' +
-        t("thAvg", { v: fmt(100 / (k + 1), 1) }) +
+        tb.fair(k) +
         "</span></button></th>";
     }
-    $("hrow").innerHTML = head;
-    document.querySelectorAll("#hrow button").forEach((b) =>
+    tb.head.innerHTML = head;
+    tb.head.querySelectorAll("button").forEach((b) =>
       b.addEventListener("click", () => {
         const c = +b.dataset.c;
-        if (c === sortCol) sortDir *= -1;
+        if (c === tb.sortCol) tb.sortDir *= -1;
         else {
-          sortCol = c;
-          sortDir = c === 0 ? 1 : -1;
+          tb.sortCol = c;
+          tb.sortDir = c === 0 ? 1 : -1;
         }
-        if (c !== 0) rankCol = c; // le rang suit le dernier nombre de joueurs choisi
+        if (c !== 0) tb.rankCol = c; // le rang suit le dernier nombre de joueurs choisi
         render();
       }),
     );
   }
-
-  /* --- Données affichées : le recalcul en cours prime, sinon le jeu complet --- */
-  function cell(i) {
-    const name = hands[i].name;
-    if (computing || (fresh && !shown)) {
-      if (fresh && fresh.hands[name])
-        return { data: fresh.hands[name], old: false };
-      if (shown && shown.hands[name])
-        return { data: shown.hands[name], old: true };
-      return null;
-    }
-    return shown && shown.hands[name]
-      ? { data: shown.hands[name], old: false }
-      : null;
-  }
-  const value = (i, k) => {
-    const c = cell(i);
-    return c ? (measure === "eq" ? c.data.eq : c.data.win)[k - 1] : null;
-  };
 
   const cardHTML = (r, suit) => {
     const red = suit === "♥" || suit === "♦";
@@ -1085,8 +709,110 @@ function initPage() {
     h.name +
     "</span>";
 
+  /* --- Un tableau : en-tête (tri, rang, ranges) et lignes des mains idx (filtrées) --- */
+  function renderTable(tb, idx, styles) {
+    const c = tb.calc;
+    tb.head.querySelectorAll("button[data-c]").forEach((b) => {
+      const col = +b.dataset.c,
+        th = b.parentElement;
+      if (col === tb.sortCol)
+        th.setAttribute(
+          "aria-sort",
+          tb.sortDir < 0 ? "descending" : "ascending",
+        );
+      else th.removeAttribute("aria-sort");
+      if (col > 0) th.title = tb.headTitle(col);
+    });
+    tb.head
+      .querySelectorAll(".rank-sub")
+      .forEach(
+        (el) => (el.textContent = t("thAtPlayers", { p: tb.rankCol + 1 })),
+      );
+
+    const message = placeholderHTML(c);
+    if (message) {
+      tb.body.innerHTML =
+        '<tr><td class="left empty" colspan="12">' + message + "</td></tr>";
+      return;
+    }
+
+    /* Classement de chaque colonne sur les 169 mains (pas seulement celles filtrées) :
+       il donne le rang, le top et la couleur. Top % = rang / nombre de mains classées :
+       AA, 1er, est dans le top 0,6 % ; une main 17e est dans le top 10 %. */
+    const value = (i, k) => valueOf(c, i, k);
+    const rankOf = [],
+      counted = [];
+    for (let k = 1; k <= MAX_OPP; k++) {
+      const ranked = hands
+        .map((h, i) => i)
+        .filter((i) => value(i, k) !== null)
+        .sort((x, y) => value(y, k) - value(x, k));
+      rankOf[k] = new Map();
+      ranked.forEach((i, r) => rankOf[k].set(i, r + 1));
+      counted[k] = ranked.length;
+    }
+
+    const rows = idx.slice();
+    if (tb.sortCol !== 0) {
+      rows.sort((x, y) => {
+        const vx = value(x, tb.sortCol),
+          vy = value(y, tb.sortCol);
+        if (vx === null && vy === null) return x - y;
+        if (vx === null) return 1;
+        if (vy === null) return -1;
+        return tb.sortDir * (vx - vy);
+      });
+    } else if (tb.sortDir < 0) rows.reverse();
+
+    const d = decimals();
+    const impossible =
+      '<td class="c na" title="' + escapeAttr(t("impossible")) + '">—</td>';
+    let html = "";
+    for (const i of rows) {
+      const x = cell(c, i);
+      const old = !!(x && x.old);
+      const rk = rankOf[tb.rankCol].get(i),
+        of = counted[tb.rankCol];
+      html +=
+        "<tr" +
+        (old ? ' class="old"' : "") +
+        '><td class="left sticky">' +
+        handHTML(hands[i]) +
+        "</td>" +
+        (rk
+          ? '<td class="rank">' +
+            rk +
+            '<span class="of"> / ' +
+            of +
+            '</span></td><td class="rank last">' +
+            t("percent", { v: fmt((rk / of) * 100, 1) }) +
+            "</td>"
+          : '<td class="rank pending">…</td><td class="rank last pending">…</td>');
+      for (let k = 1; k <= MAX_OPP; k++) {
+        const v = value(i, k);
+        if (v === null) {
+          html += x ? impossible : '<td class="c pending">…</td>';
+          continue;
+        }
+        const tier = tierOf((rankOf[k].get(i) / counted[k]) * 100);
+        html +=
+          '<td class="c' +
+          (k === tb.sortCol ? " sel" : "") +
+          '"' +
+          (old ? "" : ' style="' + styles[tier] + '"') +
+          ">" +
+          fmt(v, d) +
+          "</td>";
+      }
+      html += "</tr>";
+    }
+    tb.body.innerHTML =
+      html ||
+      '<tr><td class="left empty" colspan="12">' + t("empty") + "</td></tr>";
+  }
+
   function render() {
-    if (!$("rank-sub")) return;
+    if (!tables[0].head.firstChild) return;
     const q = query.trim().toUpperCase().replace("10", "T");
     const idx = hands
       .map((h, i) => i)
@@ -1100,157 +826,113 @@ function initPage() {
           (q.length >= 2 && name.startsWith(q[1] + q[0] + q.slice(2)))
         );
       });
-    if (sortCol !== 0) {
-      idx.sort((x, y) => {
-        const vx = value(x, sortCol),
-          vy = value(y, sortCol);
-        if (vx === null && vy === null) return x - y;
-        if (vx === null) return 1;
-        if (vy === null) return -1;
-        return sortDir * (vx - vy);
-      });
-    } else if (sortDir < 0) idx.reverse();
-
-    // Pire et meilleure valeur de chaque colonne, sur les 169 mains, pour étirer les couleurs
-    const stats = {};
-    for (let k = 1; k <= MAX_OPP; k++) {
-      let min = Infinity,
-        max = -Infinity;
-      for (let i = 0; i < N; i++) {
-        const v = value(i, k);
-        if (v !== null) {
-          if (v < min) min = v;
-          if (v > max) max = v;
-        }
-      }
-      stats[k] = { min, max };
-    }
-
-    // Rang et top sur les 169 mains (pas seulement celles filtrées), pour la colonne choisie.
-    // Top % = rang / 169 : AA, 1er, est dans le top 0,6 % ; une main 17e est dans le top 10 %.
-    const ranked = hands
-      .map((h, i) => i)
-      .filter((i) => value(i, rankCol) !== null)
-      .sort((x, y) => value(y, rankCol) - value(x, rankCol));
-    const rankOf = new Map();
-    ranked.forEach((i, r) => rankOf.set(i, r + 1));
-    $("rank-sub").textContent = t("thAtPlayers", { p: rankCol + 1 });
-    $("top-sub").textContent = t("thAtPlayers", { p: rankCol + 1 });
-
-    const d = decimals();
-    let html = "";
-    for (const i of idx) {
-      const c = cell(i);
-      const old = c && c.old;
-      const rk = rankOf.get(i);
-      html +=
-        "<tr" +
-        (old ? ' class="old"' : "") +
-        '><td class="left sticky">' +
-        handHTML(hands[i]) +
-        "</td>" +
-        (rk
-          ? '<td class="rank">' +
-            rk +
-            '<span class="of"> / ' +
-            N +
-            '</span></td><td class="rank last">' +
-            t("percent", { v: fmt((rk / N) * 100, 1) }) +
-            "</td>"
-          : '<td class="rank pending">…</td><td class="rank last pending">…</td>');
-      for (let k = 1; k <= MAX_OPP; k++) {
-        const v = value(i, k);
-        if (v === null) {
-          html += '<td class="c pending">…</td>';
-          continue;
-        }
-        html +=
-          '<td class="c' +
-          (k === sortCol ? " sel" : "") +
-          '"' +
-          (old ? "" : ' style="' + cellStyle(v, k, stats) + '"') +
-          ">" +
-          fmt(v, d) +
-          "</td>";
-      }
-      html += "</tr>";
-    }
-    $("tb").innerHTML =
-      html ||
-      '<tr><td class="left empty" colspan="12">' + t("empty") + "</td></tr>";
+    const styles = tierStyles();
+    tables.forEach((tb) => renderTable(tb, idx, styles));
     $("count").textContent = plural("count", idx.length);
-    document.querySelectorAll("#hrow button").forEach((b) => {
-      const th = b.parentElement;
-      if (+b.dataset.c === sortCol)
-        th.setAttribute("aria-sort", sortDir < 0 ? "descending" : "ascending");
-      else th.removeAttribute("aria-sort");
-    });
-    updateLegend();
+    updateLegend(styles);
+    updateThemeButton();
   }
 
-  /* --- Bandeau d'état et boutons --- */
-  function updateStatus() {
-    const doneFresh = fresh ? Object.keys(fresh.hands).length : 0;
-    $("progress").style.width = (computing ? (doneFresh / N) * 100 : 0) + "%";
-    $("progress-track").hidden = !computing;
-
-    let text;
-    if (!loaded) {
+  /* --- Bandeaux d'état et boutons --- */
+  function statusText(c) {
+    const doneFresh = c.fresh ? Object.keys(c.fresh.hands).length : 0;
+    let text = "";
+    if (!c.loaded) {
       text = t("loading");
-    } else if (computing) {
-      const elapsed = (performance.now() - runStart) / 1000;
-      const doneThisRun = doneFresh - runDoneAtStart;
+    } else if (c.computing) {
+      const elapsed = (performance.now() - c.runStart) / 1000;
+      const doneThisRun = doneFresh - c.runDoneAtStart;
       let eta = "";
       if (doneThisRun > 0) {
         const left = ((N - doneFresh) * elapsed) / doneThisRun;
-        eta = t("eta", {
-          x:
-            left >= 90
-              ? t("minutes", { n: Math.round(left / 60) })
-              : t("seconds", { n: Math.ceil(left) }),
-        });
+        eta = t("eta", { x: durationText(left) });
       }
       text = t("computing", {
         t: plural("cores", computer.threads),
         d: doneFresh,
         n: N,
+        // Temps écoulé depuis le début du calcul, reprises comprises
+        elapsed: t("elapsed", { x: durationText(c.durationBefore + elapsed) }),
         eta,
       });
-    } else if (shown) {
-      text = t("shown", {
-        trials: int(trials),
-        date: dateText(shown.computedAt),
-        src: shownFrom === "file" ? t("srcFile", { trials }) : t("srcLocal"),
-        m: marginText(trials),
-      });
-      if (saveNote) text += t(saveNote.key, { e: saveNote.e || "" });
-    } else {
-      text = t("none", { trials: int(trials) });
+    } else if (c.shown) {
+      const src = c.shownFrom === "file" ? "" : t("srcLocal");
+      text = c.top()
+        ? t("rangeShown", {
+            trials: int(trials),
+            p: top,
+            h: c.shown.ranges[0].length,
+            date: dateText(c.shown.computedAt),
+            time: tookText(c.shown),
+            src,
+          })
+        : t("shown", {
+            trials: int(trials),
+            date: dateText(c.shown.computedAt),
+            time: tookText(c.shown),
+            src,
+            m: marginText(trials),
+          });
+      if (c.saveNote) text += t(c.saveNote.key, { e: c.saveNote.e || "" });
     }
-    if (loaded && !computing && fresh && !isComplete(fresh, N))
+    if (c.loaded && !c.computing && c.fresh && !isComplete(c.fresh, N))
       text += t("interrupted", { d: doneFresh, n: N });
-    if (loaded && !serverMode && !computing) text += t("noServer");
-    $("status").textContent = text;
-
-    $("run").textContent = computing ? t("stop") : t("run");
-    $("run").classList.toggle("stop", computing);
-    $("resume").hidden = computing || !fresh || isComplete(fresh, N);
-    $("resume").textContent = t("resume", { done: doneFresh, n: N });
-    $("trials").disabled = computing;
+    if (c === calcs[0] && c.loaded && !serverMode && !c.computing)
+      text += t("noServer");
+    return text.trim();
   }
 
-  /* --- Choix du jeu de résultats à afficher --- */
-  async function loadSet() {
-    if (computing) stop();
-    const myTrials = trials;
-    shown = null;
-    fresh = null;
-    saveNote = "";
-    loaded = false;
+  function updateStatus() {
+    for (const c of calcs) {
+      const ui = c.ui;
+      const doneFresh = c.fresh ? Object.keys(c.fresh.hands).length : 0;
+      $(ui.progress).style.width =
+        (c.computing ? (doneFresh / N) * 100 : 0) + "%";
+      $(ui.track).hidden = !c.computing;
+      $(ui.status).textContent = statusText(c);
+
+      const run = $(ui.run);
+      run.textContent = c.computing ? t("stop") : t("run");
+      run.classList.toggle("stop", c.computing);
+      run.disabled = !c.computing && (busy() || !c.loaded || !c.canStart());
+      // « Recalculer » seulement s'il y a déjà des résultats ; sinon le bouton
+      // « Calculer » du message, à la place du tableau, s'en charge
+      run.hidden = !c.computing && !c.shown;
+      $(ui.resume).hidden = c.computing || !c.fresh || isComplete(c.fresh, N);
+      $(ui.resume).disabled = busy();
+      $(ui.resume).textContent = t("resume", { done: doneFresh, n: N });
+    }
+    $("trials").disabled = busy();
+    $("top").disabled = calcs[1].computing;
+  }
+
+  const refresh = () => {
+    render();
     updateStatus();
-    const local = storageRead(trials);
-    const file = await loadResultsFile(trials);
-    if (myTrials !== trials) return; // l'utilisateur a changé d'avis entre-temps
+  };
+
+  /* --- Choix du jeu de résultats à afficher --- */
+
+  // Par défaut : le plus grand nombre de donnes déjà calculé (fichier ou navigateur)
+  async function pickDefaultTrials() {
+    for (const n of TRIAL_CHOICES.slice().reverse()) {
+      if (isComplete(storageRead(setName(n)), N) || (await loadResultsFile(n)))
+        return n;
+    }
+    return TRIAL_CHOICES[0];
+  }
+
+  async function loadCalc(c) {
+    if (c.computing) stopCalc(c);
+    const name = nameOf(c);
+    c.shown = null;
+    c.fresh = null;
+    c.saveNote = "";
+    c.loaded = false;
+    refresh();
+    const local = storageRead(name);
+    const file = await loadResultsFile(trials, c.top());
+    if (name !== nameOf(c)) return; // l'utilisateur a changé d'avis entre-temps
 
     // Le plus récent des jeux complets est affiché
     const candidates = [];
@@ -1260,40 +942,47 @@ function initPage() {
       String(b.set.computedAt).localeCompare(String(a.set.computedAt)),
     );
     if (candidates.length) {
-      shown = candidates[0].set;
-      shownFrom = candidates[0].from;
+      c.shown = candidates[0].set;
+      c.shownFrom = candidates[0].from;
     }
-
-    if (local && !isComplete(local, N)) fresh = local; // recalcul interrompu
-    loaded = true;
-    render();
-    updateStatus();
-
-    if (!shown) start(!!fresh); // rien de disponible : on calcule
+    if (local && !isComplete(local, N)) c.fresh = local; // recalcul interrompu
+    c.loaded = true;
+    refresh();
   }
 
-  /* --- Calcul --- */
-  function start(resume) {
-    if (!resume || !fresh) {
-      fresh = { trials, computedAt: null, hands: {} };
-      storageWrite(trials, fresh);
+  /* --- Calcul (dans ce navigateur) --- */
+  function startCalc(c, resume) {
+    if (busy() || !c.loaded) return;
+    if (!resume || !c.fresh) {
+      const set = c.newSet();
+      if (!set) return;
+      c.fresh = set;
+      storageWrite(nameOf(c), set);
     }
-    const job = fresh,
-      jobTrials = trials; // ce calcul précis, même si l'affichage change
+    const job = c.fresh,
+      jobName = nameOf(c); // ce calcul précis, même si l'affichage change
     const todo = hands
       .map((h, i) => i)
       .filter((i) => !job.hands[hands[i].name]);
-    computing = true;
-    saveNote = "";
-    runStart = performance.now();
-    runDoneAtStart = Object.keys(job.hands).length;
+    c.computing = true;
+    c.saveNote = "";
+    c.runStart = performance.now();
+    c.runDoneAtStart = Object.keys(job.hands).length;
     let lastRender = 0;
+    // Durée cumulée sur toutes les reprises du calcul
+    const durationBefore = job.duration || 0,
+      runStart = c.runStart;
+    c.durationBefore = durationBefore;
     if (computer) computer.stop();
     computer = createComputer(
-      (index, result) => {
-        job.hands[hands[index].name] = roundHand(result);
-        storageWrite(jobTrials, job); // sauvegarde main par main
-        if (fresh !== job) return;
+      (task, result) => {
+        job.hands[hands[task.index].name] = roundHand(result);
+        job.duration = Math.round(
+          durationBefore + (performance.now() - runStart) / 1000,
+        );
+        job.threads = computer.threads;
+        storageWrite(jobName, job); // sauvegarde main par main
+        if (c.fresh !== job) return;
         if (performance.now() - lastRender > 500) {
           render();
           lastRender = performance.now();
@@ -1302,48 +991,65 @@ function initPage() {
       },
       async () => {
         job.computedAt = new Date().toISOString();
-        const savedLocal = storageWrite(jobTrials, job);
+        const savedLocal = storageWrite(jobName, job);
         let from = "local",
           note = "";
         if (serverMode) {
           const error = await saveResultsFile(job);
           if (!error) {
             from = "file";
-            storageRemove(jobTrials); // le fichier JSON fait foi, plus besoin de la copie
+            storageRemove(jobName); // le fichier JSON fait foi, plus besoin de la copie
           } else {
             note = { key: "saveFail", e: error };
           }
         } else if (!savedLocal) {
           note = { key: "privateFail" };
         }
-        if (fresh !== job) return;
-        computing = false;
-        shown = job;
-        shownFrom = from;
-        fresh = null;
-        saveNote = note;
-        render();
-        updateStatus();
+        if (c.fresh !== job) return;
+        c.computing = false;
+        c.shown = job;
+        c.shownFrom = from;
+        c.fresh = null;
+        c.saveNote = note;
+        refresh();
       },
     );
-    computer.start(todo, trials);
-    render();
-    updateStatus();
+    computer.start(c.jobs(job, todo));
+    refresh();
   }
 
-  function stop() {
+  function stopCalc(c) {
     if (computer) computer.stop();
-    computing = false;
-    render();
-    updateStatus();
+    c.computing = false;
+    refresh();
   }
 
   /* --- Contrôles --- */
-  $("run").addEventListener("click", () => (computing ? stop() : start(false)));
-  $("resume").addEventListener("click", () => start(true));
-  $("trials").addEventListener("change", () => {
+  calcs.forEach((c) => {
+    $(c.ui.run).addEventListener("click", () =>
+      c.computing ? stopCalc(c) : startCalc(c, false),
+    );
+    $(c.ui.resume).addEventListener("click", () => startCalc(c, true));
+  });
+  // Le temps écoulé avance chaque seconde, même si aucune main ne se termine
+  setInterval(() => {
+    if (busy()) updateStatus();
+  }, 1000);
+  // Bouton « Calculer » du message affiché à la place d'un tableau vide
+  tables.forEach((tb) =>
+    tb.body.addEventListener("click", (e) => {
+      const b = e.target.closest("[data-start]");
+      if (b) startCalc(calcs[+b.dataset.start], false);
+    }),
+  );
+  $("trials").addEventListener("change", async () => {
     trials = +$("trials").value;
-    loadSet();
+    await loadCalc(calcs[0]); // le second tableau a besoin du premier
+    loadCalc(calcs[1]);
+  });
+  $("top").addEventListener("change", () => {
+    top = +$("top").value;
+    loadCalc(calcs[1]);
   });
 
   document.querySelectorAll("[data-f]").forEach((b) =>
@@ -1369,46 +1075,45 @@ function initPage() {
     render();
   });
 
-  /* --- Menu des langues : un drapeau, qui ouvre la liste au clic --- */
-  const langMenu = $("lang-menu"),
-    langBtn = $("lang-btn");
-  const openLangMenu = (open) => {
-    langMenu.hidden = !open;
-    langBtn.setAttribute("aria-expanded", String(open));
-    if (open) {
-      const current = langMenu.querySelector('[data-lang="' + lang + '"]');
-      if (current) current.focus();
-    }
-  };
-  document.querySelectorAll("[data-lang]").forEach((b) => {
-    b.querySelector(".flag-icon").innerHTML = FLAGS[b.dataset.lang];
-    b.addEventListener("click", () => {
-      lang = b.dataset.lang;
-      try {
-        localStorage.setItem(LANG_KEY, lang);
-      } catch (e) {
-        /* rien */
+  /* --- Menus de la langue et du thème : une icône, qui ouvre la liste au clic --- */
+  const menus = [];
+  function setupMenu(btn, menu, onPick) {
+    const m = { btn, menu };
+    m.open = (open) => {
+      menu.hidden = !open;
+      btn.setAttribute("aria-expanded", String(open));
+      if (open) {
+        menus.filter((o) => o !== m).forEach((o) => o.open(false));
+        const current = menu.querySelector('[aria-checked="true"]');
+        if (current) current.focus();
       }
-      openLangMenu(false);
-      langBtn.focus();
-      applyLanguage();
+    };
+    menu.querySelectorAll("button").forEach((b) =>
+      b.addEventListener("click", () => {
+        onPick(b);
+        m.open(false);
+        btn.focus();
+      }),
+    );
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      m.open(menu.hidden);
     });
-  });
-  langBtn.addEventListener("click", (e) => {
-    e.stopPropagation();
-    openLangMenu(langMenu.hidden);
-  });
+    menus.push(m);
+  }
   document.addEventListener("click", (e) => {
-    if (!langMenu.hidden && !langMenu.contains(e.target)) openLangMenu(false);
+    for (const m of menus)
+      if (!m.menu.hidden && !m.menu.contains(e.target)) m.open(false);
   });
   document.addEventListener("keydown", (e) => {
-    if (langMenu.hidden) return;
+    const m = menus.find((o) => !o.menu.hidden);
+    if (!m) return;
     if (e.key === "Escape") {
-      openLangMenu(false);
-      langBtn.focus();
+      m.open(false);
+      m.btn.focus();
     }
     if (e.key === "ArrowDown" || e.key === "ArrowUp") {
-      const items = [...langMenu.querySelectorAll("[data-lang]")];
+      const items = [...m.menu.querySelectorAll("button")];
       const i = items.indexOf(document.activeElement);
       items[
         (i + (e.key === "ArrowDown" ? 1 : items.length - 1)) % items.length
@@ -1416,6 +1121,35 @@ function initPage() {
       e.preventDefault();
     }
   });
+
+  document.querySelectorAll("[data-lang]").forEach((b) => {
+    b.querySelector(".flag-icon").innerHTML = FLAGS[b.dataset.lang];
+  });
+  setupMenu($("lang-btn"), $("lang-menu"), (b) => {
+    lang = b.dataset.lang;
+    try {
+      localStorage.setItem(LANG_KEY, lang);
+    } catch (e) {
+      /* rien */
+    }
+    applyLanguage();
+  });
+
+  document.querySelectorAll("[data-theme-choice]").forEach((b) => {
+    b.querySelector(".theme-icon").innerHTML =
+      THEME_ICONS[b.dataset.themeChoice];
+  });
+  // Le changement d'attribut data-theme redessine la page (MutationObserver plus bas)
+  setupMenu($("theme-btn"), $("theme-menu"), (b) => {
+    const choice = b.dataset.themeChoice;
+    document.documentElement.setAttribute("data-theme", choice);
+    try {
+      localStorage.setItem(THEME_KEY, choice);
+    } catch (e) {
+      /* rien */
+    }
+  });
+
   $("colorblind").addEventListener("click", () => {
     colorblind = !colorblind;
     try {
@@ -1452,27 +1186,17 @@ function initPage() {
     );
 
   applyLanguage();
-  detectServer().then((ok) => {
+  detectServer().then(async (ok) => {
     serverMode = ok;
-    loadSet();
+    trials = await pickDefaultTrials();
+    $("trials").value = String(trials);
+    // Le premier tableau d'abord : le second en a besoin pour son bouton « Calculer »
+    await loadCalc(calcs[0]);
+    loadCalc(calcs[1]);
   });
 }
 
-/* --- Démarrage : page web ou module Node (server.js, compute.js) --- */
-if (typeof document !== "undefined") {
-  if (document.readyState === "loading")
-    document.addEventListener("DOMContentLoaded", initPage);
-  else initPage();
-}
-if (typeof module !== "undefined") {
-  module.exports = {
-    pokerEngine,
-    Engine,
-    runTests,
-    roundHand,
-    formatResultsFile,
-    validateResults,
-    TRIAL_CHOICES,
-    I18N,
-  };
-}
+/* --- Démarrage --- */
+if (document.readyState === "loading")
+  document.addEventListener("DOMContentLoaded", initPage);
+else initPage();

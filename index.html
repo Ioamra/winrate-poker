@@ -14,6 +14,13 @@
       href="https://fonts.googleapis.com/css2?family=Syne:wght@600;800&family=Familjen+Grotesk:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap"
     />
     <link rel="stylesheet" href="style.css" />
+    <script>
+      // Thème choisi (menu soleil / lune), appliqué avant l'affichage pour éviter un flash
+      try {
+        var theme = localStorage.getItem("equites-preflop-theme");
+        if (theme) document.documentElement.setAttribute("data-theme", theme);
+      } catch (e) {}
+    </script>
   </head>
   <body>
     <div class="wrap">
@@ -23,11 +30,58 @@
             <span data-i18n="h1">Équités préflop, 169 mains</span>
             <span class="s" aria-hidden="true">♥</span>
           </h1>
-          <div class="lang">
+          <div class="pickers">
+          <div class="picker">
+            <button
+              type="button"
+              id="theme-btn"
+              class="picker-btn"
+              aria-haspopup="true"
+              aria-expanded="false"
+              aria-controls="theme-menu"
+            >
+              <span id="theme-icon" class="theme-icon"></span>
+              <svg
+                class="chev"
+                viewBox="0 0 10 6"
+                width="10"
+                height="6"
+                aria-hidden="true"
+              >
+                <path
+                  d="M1 1l4 4 4-4"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.5"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                />
+              </svg>
+            </button>
+            <div id="theme-menu" class="picker-menu" role="menu" hidden>
+              <button
+                type="button"
+                role="menuitemradio"
+                data-theme-choice="light"
+                aria-checked="false"
+              >
+                <span class="theme-icon"></span><span data-i18n="light">Clair</span>
+              </button>
+              <button
+                type="button"
+                role="menuitemradio"
+                data-theme-choice="dark"
+                aria-checked="false"
+              >
+                <span class="theme-icon"></span><span data-i18n="dark">Sombre</span>
+              </button>
+            </div>
+          </div>
+          <div class="picker">
             <button
               type="button"
               id="lang-btn"
-              class="lang-btn"
+              class="picker-btn"
               aria-haspopup="true"
               aria-expanded="false"
               aria-controls="lang-menu"
@@ -50,7 +104,7 @@
                 />
               </svg>
             </button>
-            <div id="lang-menu" class="lang-menu" role="menu" hidden>
+            <div id="lang-menu" class="picker-menu" role="menu" hidden>
               <button
                 type="button"
                 role="menuitemradio"
@@ -68,6 +122,7 @@
                 <span class="flag-icon"></span>English
               </button>
             </div>
+          </div>
           </div>
         </div>
         <p class="lede" data-i18n-html="lede"></p>
@@ -170,9 +225,8 @@
           />
         </div>
         <div class="legend">
-          <span data-i18n="legendLow">sous la moyenne</span
-          ><span class="ramp" id="ramp" aria-hidden="true"></span
-          ><span data-i18n="legendHigh">au-dessus</span>
+          <span data-i18n="legendLabel">Couleurs : top</span
+          ><span class="tiers" id="tiers"></span>
           <button
             type="button"
             class="seg"
@@ -194,7 +248,40 @@
           <tbody id="tb"></tbody>
         </table>
       </div>
+
+      <section class="run range">
+        <h2 data-i18n="rangeTitle">Contre les meilleures mains</h2>
+        <p class="lede" data-i18n-html="rangeLede"></p>
+        <div class="run-controls">
+          <label for="top" class="lbl" data-i18n="topLabel"
+            >Adversaires dans le top</label
+          >
+          <select id="top"></select>
+          <button type="button" id="run2" class="primary">Recalculer</button>
+          <button type="button" id="resume2" class="secondary" hidden></button>
+        </div>
+        <div
+          class="progress-track"
+          id="progress-track2"
+          aria-hidden="true"
+          hidden
+        >
+          <div id="progress2" class="progress"></div>
+        </div>
+        <p id="range-status" class="status" role="status"></p>
+      </section>
+
+      <div class="tablebox">
+        <table>
+          <thead>
+            <tr id="hrow2"></tr>
+          </thead>
+          <tbody id="tb2"></tbody>
+        </table>
+      </div>
     </div>
+    <script src="engine.js"></script>
+    <script src="i18n.js"></script>
     <script src="script.js"></script>
   </body>
 </html>

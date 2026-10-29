@@ -6,15 +6,21 @@
      BASE_PATH=/poker                  si la page est servie sous un sous-chemin
                                        (le tunnel Cloudflare transmet le chemin complet)
 
-   - sert la page : index.html, style.css, script.js et results/*.json
+   - sert la page : index.html, style.css, engine.js, i18n.js, script.js et results/*.json
    - GET  <BASE_PATH>/api/ping                 indique à la page que le serveur est là
    - POST <BASE_PATH>/api/results/<donnes>     écrit results/<donnes>.json après vérification
+   - POST <BASE_PATH>/api/results/<donnes>-top<p>   écrit results/<donnes>-top<p>.json (second tableau)
 */
 "use strict";
 const http = require("http");
 const fs = require("fs");
 const path = require("path");
-const { validateResults, formatResultsFile } = require("./script.js");
+const {
+  validateResults,
+  validateRangeResults,
+  topRanges,
+  formatResultsFile,
+} = require("./engine.js");
 
 const ROOT = __dirname;
 const RESULTS = path.join(ROOT, "results");
@@ -36,6 +42,8 @@ const PUBLIC = {
   "/": "index.html",
   "/index.html": "index.html",
   "/style.css": "style.css",
+  "/engine.js": "engine.js",
+  "/i18n.js": "i18n.js",
   "/script.js": "script.js",
 };
 const TYPES = {
@@ -56,7 +64,8 @@ function send(res, status, body, type = "application/json; charset=utf-8") {
 
 function serveFile(res, route) {
   let file = PUBLIC[route];
-  const m = route.match(/^\/results\/(\d+)\.json$/);
+  // results/<donnes>.json (premier tableau) et results/<donnes>-top<p>.json (second)
+  const m = route.match(/^\/results\/(\d+(?:-top\d+)?)\.json$/);
   if (m) file = path.join("results", m[1] + ".json");
   if (!file) return send(res, 404, { error: "introuvable" });
   fs.readFile(path.join(ROOT, file), (err, data) => {
@@ -65,20 +74,33 @@ function serveFile(res, route) {
   });
 }
 
-// Plus grand écart entre deux jeux de résultats, en points
+// Plus grand écart entre deux jeux de résultats, en points (les cases impossibles, null, sont ignorées)
 function maxDrift(a, b) {
   let max = 0;
   for (const name of Object.keys(a.hands)) {
     for (const key of ["eq", "win"]) {
       a.hands[name][key].forEach((v, i) => {
-        max = Math.max(max, Math.abs(v - b.hands[name][key][i]));
+        const w = b.hands[name][key][i];
+        if (v !== null && w !== null) max = Math.max(max, Math.abs(v - w));
       });
     }
   }
   return max;
 }
 
-function saveResults(req, res, trials) {
+const readJson = (file) => {
+  try {
+    return JSON.parse(fs.readFileSync(file, "utf8"));
+  } catch (e) {
+    return null;
+  }
+};
+
+/* Enregistre un jeu envoyé par la page.
+   top absent : premier tableau ; sinon second tableau, dont les ranges doivent
+   correspondre au classement du fichier results/<donnes>.json du serveur. */
+function saveResults(req, res, trials, top) {
+  const name = top ? trials + "-top" + top : String(trials);
   let body = "",
     tooBig = false;
   req.on("data", (chunk) => {
@@ -96,25 +118,39 @@ function saveResults(req, res, trials) {
     } catch (e) {
       return send(res, 400, { error: "JSON illisible" });
     }
-    if (set.trials !== trials)
+    if (set.trials !== trials || (top && set.top !== top))
       return send(res, 400, { error: "le nombre de donnes ne correspond pas" });
-    const problem = validateResults(set);
+    const problem = top ? validateRangeResults(set) : validateResults(set);
     if (problem) return send(res, 400, { error: problem });
+    if (top) {
+      const base = readJson(path.join(RESULTS, trials + ".json"));
+      if (!base || validateResults(base))
+        return send(res, 400, {
+          error: "le premier tableau manque sur le serveur",
+        });
+      if (JSON.stringify(topRanges(base, top)) !== JSON.stringify(set.ranges))
+        return send(res, 400, {
+          error:
+            "le classement ne correspond pas au premier tableau du serveur",
+        });
+    }
 
-    if (lastSave[trials] && Date.now() - lastSave[trials] < MIN_INTERVAL) {
+    if (lastSave[name] && Date.now() - lastSave[name] < MIN_INTERVAL) {
       return send(res, 429, {
         error:
           "un autre calcul vient d'être enregistré, réessaie dans une minute",
       });
     }
-    const target = path.join(RESULTS, trials + ".json");
-    let previous = null;
-    try {
-      previous = JSON.parse(fs.readFileSync(target, "utf8"));
-    } catch (e) {
-      /* pas encore de fichier */
-    }
-    if (previous && !validateResults(previous)) {
+    const target = path.join(RESULTS, name + ".json");
+    const previous = readJson(target);
+    // Comparaison seulement avec un ancien calcul fait sur les mêmes ranges
+    const comparable =
+      previous &&
+      (top
+        ? !validateRangeResults(previous) &&
+          JSON.stringify(previous.ranges) === JSON.stringify(set.ranges)
+        : !validateResults(previous));
+    if (comparable) {
       const drift = maxDrift(set, previous);
       if (drift > MAX_DRIFT) {
         console.warn(
@@ -134,14 +170,14 @@ function saveResults(req, res, trials) {
     const tmp = target + ".tmp";
     fs.writeFileSync(tmp, formatResultsFile(set));
     fs.renameSync(tmp, target);
-    lastSave[trials] = Date.now();
+    lastSave[name] = Date.now();
     console.log(
       new Date().toLocaleString("fr-FR") +
         " · results/" +
-        trials +
+        name +
         ".json enregistré",
     );
-    send(res, 200, { ok: true, file: "results/" + trials + ".json" });
+    send(res, 200, { ok: true, file: "results/" + name + ".json" });
   });
 }
 
@@ -167,8 +203,9 @@ http
 
     if (url === "/api/ping" && req.method === "GET")
       return send(res, 200, { ok: true });
-    const m = url.match(/^\/api\/results\/(\d+)$/);
-    if (m && req.method === "POST") return saveResults(req, res, Number(m[1]));
+    const m = url.match(/^\/api\/results\/(\d+)(?:-top(\d+))?$/);
+    if (m && req.method === "POST")
+      return saveResults(req, res, Number(m[1]), m[2] ? Number(m[2]) : null);
     if (req.method === "GET" || req.method === "HEAD")
       return serveFile(res, url);
     send(res, 405, { error: "méthode non prise en charge" });
